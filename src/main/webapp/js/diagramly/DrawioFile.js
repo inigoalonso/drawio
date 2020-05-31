@@ -21,6 +21,7 @@ DrawioFile = function(ui, data)
 	this.data = data || '';
 	this.shadowData = this.data;
 	this.shadowPages = null;
+	this.created = new Date().getTime();
 	
 	// Creates the stats object
 	this.stats = {
@@ -562,7 +563,7 @@ DrawioFile.prototype.sendErrorReport = function(title, details, error, max)
 		var stack = (error != null) ? error.stack : new Error().stack;
 		
 		EditorUi.sendReport(title + ' ' + new Date().toISOString() + ':' +
-			'\n\nBrowser=' + navigator.userAgent +
+			'\n\nAppVersion=' + navigator.appVersion +
 			'\nFile=' + this.ui.hashValue(this.getId()) + ' (' + this.getMode() + ')' +
 			((this.isModified()) ? ' modified' : '') +
 			'\nSize/Type=' + this.getSize() + ' (' + ext + ')' +
@@ -835,11 +836,76 @@ DrawioFile.prototype.save = function(revision, success, error, unloading, overwr
  * @param {number} dx X-coordinate of the translation.
  * @param {number} dy Y-coordinate of the translation.
  */
-DrawioFile.prototype.updateFileData = function()
+DrawioFile.prototype.updateFileData = function(compressOverride)
 {
-	var nonCompressed = (this.ui.fileNode != null) ? this.ui.fileNode.getAttribute('compressed') == 'false' : false;
+	this.setData(this.ui.getFileData(null, null, null, null, null, null, null, null, this, compressOverride != null? !compressOverride : !this.isCompressed()));
+};
+
+/**
+ * Translates this point by the given vector.
+ * 
+ * @param {number} dx X-coordinate of the translation.
+ * @param {number} dy Y-coordinate of the translation.
+ */
+DrawioFile.prototype.isCompressedStorage = function()
+{
+	return true;
+};
+
+/**
+ * Translates this point by the given vector.
+ * 
+ * @param {number} dx X-coordinate of the translation.
+ * @param {number} dy Y-coordinate of the translation.
+ */
+DrawioFile.prototype.isCompressed = function()
+{
+	var compressed = (this.ui.fileNode != null) ? this.ui.fileNode.getAttribute('compressed') : null;
 	
-	this.setData(this.ui.getFileData(null, null, null, null, null, null, null, null, this, nonCompressed));
+	if (compressed != null)
+	{
+		return compressed != 'false';
+	}
+	else
+	{
+		return this.isCompressedStorage() && Editor.compressXml;
+	}
+};
+
+/**
+ * Translates this point by the given vector.
+ * 
+ * @param {number} dx X-coordinate of the translation.
+ * @param {number} dy Y-coordinate of the translation.
+ */
+DrawioFile.prototype.decompress = function()
+{
+	this.updateFileData(false);
+	
+	if (this.ui.fileNode != null)
+	{
+		this.ui.fileNode.setAttribute('compressed', 'false');
+	}
+	
+	this.fileChanged();
+};
+
+/**
+ * Translates this point by the given vector.
+ * 
+ * @param {number} dx X-coordinate of the translation.
+ * @param {number} dy Y-coordinate of the translation.
+ */
+DrawioFile.prototype.compress = function()
+{
+	this.updateFileData(true);
+
+	if (this.ui.fileNode != null)
+	{
+		this.ui.fileNode.setAttribute('compressed', 'true');
+	}
+	
+	this.fileChanged();
 };
 
 /**
@@ -952,6 +1018,17 @@ DrawioFile.prototype.isMovable = function()
  * @param {number} dx X-coordinate of the translation.
  * @param {number} dy Y-coordinate of the translation.
  */
+DrawioFile.prototype.isTrashed = function()
+{
+	return false;
+};
+
+/**
+ * Translates this point by the given vector.
+ * 
+ * @param {number} dx X-coordinate of the translation.
+ * @param {number} dy Y-coordinate of the translation.
+ */
 DrawioFile.prototype.move = function(folderId, success, error) { };
 
 /**
@@ -1022,6 +1099,23 @@ DrawioFile.prototype.open = function()
 	
 	if (data != null)
 	{
+		//Remove external fonts of previous file
+		function removeExtFont(elems)
+		{
+			for (var i = 0; elems != null && i < elems.length; i++)
+			{
+				var e = elems[i];
+				
+				if (e.id != null && e.id.indexOf('extFont_') == 0)
+				{
+					e.parentNode.removeChild(e);
+				}
+			}
+		};
+		
+		removeExtFont(document.querySelectorAll('head > style[id]'));
+		removeExtFont(document.querySelectorAll('head > link[id]'));
+		
 		this.ui.setFileData(data);
 		
 		// Updates shadow in case any page IDs have been updated
@@ -1163,6 +1257,22 @@ DrawioFile.prototype.getLastModifiedDate = function()
 };
 
 /**
+ * Sets the current revision ID.
+ */
+DrawioFile.prototype.setCurrentRevisionId = function(id)
+{
+	this.setDescriptorRevisionId(this.getDescriptor(), id);
+};
+
+/**
+ * Returns the current revision ID.
+ */
+DrawioFile.prototype.getCurrentRevisionId = function()
+{
+	return this.getDescriptorRevisionId(this.getDescriptor());
+};
+
+/**
  * Sets the current etag.
  */
 DrawioFile.prototype.setCurrentEtag = function(etag)
@@ -1192,6 +1302,22 @@ DrawioFile.prototype.getDescriptor = function()
 DrawioFile.prototype.setDescriptor = function() { };
 
 /**
+ * Updates the revision ID on the given descriptor.
+ */
+DrawioFile.prototype.setDescriptorRevisionId = function(desc, id)
+{
+	this.setDescriptorEtag(desc, id);
+};
+
+/**
+ * Returns the revision ID from the given descriptor.
+ */
+DrawioFile.prototype.getDescriptorRevisionId = function(desc)
+{
+	return this.getDescriptorEtag(desc);
+};
+
+/**
  * Updates the etag on the given descriptor.
  */
 DrawioFile.prototype.setDescriptorEtag = function(desc, etag) { };
@@ -1205,7 +1331,15 @@ DrawioFile.prototype.getDescriptorEtag = function(desc)
 };
 
 /**
- * Returns the secret from the given descriptor.
+ * Returns the secret from the given descriptor. This must be stored
+ * in a custom property and generated by the saving client so that a
+ * token can be obtained from the cache for writing the patch after
+ * saving the file. If this cannot be saved in a custom property then
+ * null must be returned so that no deltas are used for updating the
+ * file (the file is reloaded every time instead). This is needed to
+ * make sure nobody with read-only permissions can write a patch to
+ * the cache before the saving client wrote the patch and inject
+ * data into the file via other clients merging that data.
  */
 DrawioFile.prototype.getDescriptorSecret = function(desc)
 {
@@ -1276,6 +1410,57 @@ DrawioFile.prototype.addAllSavedStatus = function(status)
 /**
  * Adds the listener for automatically saving the diagram for local changes.
  */
+DrawioFile.prototype.saveDraft = function()
+{
+	try
+	{
+		if (this.draftId == null)
+		{
+			this.draftId = Editor.guid();
+		}
+		
+		var draft = {type: 'draft',
+			created: this.created,
+			modified: new Date().getTime(),
+			data: this.ui.getFileData(),
+			title: this.getTitle(),
+			aliveCheck: this.ui.draftAliveCheck};
+		this.ui.setDatabaseItem('.draft_' + this.draftId,
+			JSON.stringify(draft));
+		
+		EditorUi.debug('draft saved', this.draftId, draft);
+	}
+	catch (e)
+	{
+		console.error(e);
+		
+		// Removes any stored draft
+		this.removeDraft();
+	}
+};
+
+/**
+ * Adds the listener for automatically saving the diagram for local changes.
+ */
+DrawioFile.prototype.removeDraft = function()
+{
+	try
+	{
+		if (this.draftId != null)
+		{
+			this.ui.removeDatabaseItem('.draft_' + this.draftId);
+			EditorUi.debug('draft deleted', '.draft_' + this.draftId);
+		}
+	}
+	catch (e)
+	{
+		// ignore
+	}
+};
+
+/**
+ * Adds the listener for automatically saving the diagram for local changes.
+ */
 DrawioFile.prototype.addUnsavedStatus = function(err)
 {
 	if (!this.inConflictState && this.ui.statusContainer != null && this.ui.getCurrentFile() == this)
@@ -1290,19 +1475,6 @@ DrawioFile.prototype.addUnsavedStatus = function(err)
 		}
 		else
 		{
-			// FIXME: Handle multiple tabs
-	//		if (this.ui.mode == null && urlParams['splash'] == '0')
-	//		{
-	//			try
-	//			{
-	//				this.ui.updateDraft();
-	//				this.setModified(false);
-	//			}
-	//			catch (e)
-	//			{
-	//				// Keeps modified flag unchanged
-	//			}
-	//		}
 			var msg = this.getErrorMessage(err);
 
 			if (msg == null && this.lastSaved != null)
@@ -1345,6 +1517,11 @@ DrawioFile.prototype.addUnsavedStatus = function(err)
 				this.ui.editor.setStatus('<div title="'+ status +
 					'" class="geStatusAlert" style="overflow:hidden;">' + status +
 					' (' + mxUtils.htmlEntities(err.message) + ')</div>');
+			}
+			
+			if (EditorUi.enableDrafts && this.getMode() == null)
+			{
+				this.saveDraft();
 			}
 		}
 	}
@@ -1476,7 +1653,7 @@ DrawioFile.prototype.showConflictDialog = function(overwrite, synchronize)
 /**
  * Checks if the client is authorized and calls the next step.
  */
-DrawioFile.prototype.redirectToNewApp = function(error)
+DrawioFile.prototype.redirectToNewApp = function(error, details)
 {
 	this.ui.spinner.stop();
 	
@@ -1486,6 +1663,12 @@ DrawioFile.prototype.redirectToNewApp = function(error)
 		
 		var url = window.location.protocol + '//' + window.location.host + '/' + this.ui.getSearch(
 			['create', 'title', 'mode', 'url', 'drive', 'splash', 'state']) + '#' + this.getHash();
+		var msg = mxResources.get('redirectToNewApp');
+		
+		if (details != null)
+		{
+			msg += ' (' + details + ')';
+		}
 		
 		var redirect = mxUtils.bind(this, function()
 		{
@@ -1520,7 +1703,7 @@ DrawioFile.prototype.redirectToNewApp = function(error)
 		{
 			if (this.isModified())
 			{
-				this.ui.confirm(mxResources.get('redirectToNewApp'), mxUtils.bind(this, function()
+				this.ui.confirm(msg, mxUtils.bind(this, function()
 				{
 					this.redirectDialogShowing = false;
 					error();
@@ -1528,7 +1711,7 @@ DrawioFile.prototype.redirectToNewApp = function(error)
 			}
 			else
 			{
-				this.ui.confirm(mxResources.get('redirectToNewApp'), redirect, mxUtils.bind(this, function()
+				this.ui.confirm(msg, redirect, mxUtils.bind(this, function()
 				{
 					this.redirectDialogShowing = false;
 					error();
@@ -1557,7 +1740,15 @@ DrawioFile.prototype.handleFileSuccess = function(saved)
 		}
 		else if (saved)
 		{
-			this.addAllSavedStatus();
+			if (this.isTrashed())
+			{
+				this.addAllSavedStatus(mxUtils.htmlEntities(mxResources.get(this.allChangesSavedKey)) + ' (' +
+					mxUtils.htmlEntities(mxResources.get('fileMovedToTrash')) + ')');
+			}
+			else
+			{
+				this.addAllSavedStatus();
+			}
 
 			if (this.sync != null)
 			{
@@ -1752,9 +1943,29 @@ DrawioFile.prototype.fileChanged = function()
 };
 
 /**
+ * Creates a secret and token pair for writing a patch to the cache.
+ */
+DrawioFile.prototype.createSecret = function(success, error)
+{
+	var secret = Editor.guid(32);
+	
+	if (this.sync != null)
+	{
+		this.sync.createToken(secret, mxUtils.bind(this, function(token)
+		{
+			success(secret, token);
+		}), error);
+	}
+	else
+	{
+		success(secret);
+	}
+};
+
+/**
  * Invokes sync and updates shadow document.
  */
-DrawioFile.prototype.fileSaved = function(savedData, lastDesc, success, error)
+DrawioFile.prototype.fileSaved = function(savedData, lastDesc, success, error, token)
 {
 	this.lastSaved = new Date();
 	this.ageStart = null;
@@ -1779,7 +1990,7 @@ DrawioFile.prototype.fileSaved = function(savedData, lastDesc, success, error)
 		{
 			this.sync.fileSaved(this.ui.getPagesForNode(
 				mxUtils.parseXml(savedData).documentElement),
-				lastDesc, success, error, savedData);
+				lastDesc, success, error, token);
 		}
 	}
 	catch (e)

@@ -38,6 +38,11 @@ GitHubClient.prototype.baseUrl = 'https://api.github.com';
 GitHubClient.prototype.maxFileSize = 1000000 /*1MB*/;
 
 /**
+ * Name for the auth token header.
+ */
+GitHubClient.prototype.authToken = 'token';
+
+/**
  * Authorizes the client, gets the userId and calls <open>.
  */
 GitHubClient.prototype.updateUser = function(success, error, failOnAuth)
@@ -50,7 +55,15 @@ GitHubClient.prototype.updateUser = function(success, error, failOnAuth)
 		error({code: App.ERROR_TIMEOUT, message: mxResources.get('timeout')});
 	}), this.ui.timeout);
 	
-	mxUtils.get(this.baseUrl + '/user?access_token=' + this.token, mxUtils.bind(this, function(userReq)
+	var userReq = new mxXmlRequest(this.baseUrl + '/user', null, 'GET');
+	var temp = this.authToken + ' ' + this.token;
+	
+	userReq.setRequestHeaders = function(request, params)
+	{
+		request.setRequestHeader('Authorization', temp);
+	};
+	
+	userReq.send(mxUtils.bind(this, function()
 	{
 		window.clearTimeout(timeoutThread);
 		
@@ -82,7 +95,7 @@ GitHubClient.prototype.updateUser = function(success, error, failOnAuth)
 				success();
 			}
 		}
-	}));
+	}), error);
 };
 
 /**
@@ -250,11 +263,11 @@ GitHubClient.prototype.executeRequest = function(req, success, error, ignoreNotF
 			error({code: App.ERROR_TIMEOUT, retry: fn});
 		}), this.ui.timeout);
 		
-		var temp = this.token;
+		var temp = this.authToken + ' ' + this.token;
 		
 		req.setRequestHeaders = function(request, params)
 		{
-			request.setRequestHeader('Authorization', 'token ' + temp);
+			request.setRequestHeader('Authorization', temp);
 		};
 		
 		req.send(mxUtils.bind(this, function()
@@ -400,17 +413,17 @@ GitHubClient.prototype.getFile = function(path, success, error, asLibrary, check
 	
 	// Handles .vsdx, Gliffy and PNG+XML files by creating a temporary file
 	if (!checkExists && (/\.v(dx|sdx?)$/i.test(path) || /\.gliffy$/i.test(path) ||
-		(!this.ui.useCanvasForExport && binary)))
+		/\.pdf$/i.test(path) || (!this.ui.useCanvasForExport && binary)))
 	{
 		// Should never be null
 		if (this.token != null)
 		{
-			var url = this.baseUrl + '/repos/' + org + '/' + repo + '/contents/' +
-				path + '?ref=' + ref + '&token=' + this.token;
+			var url = this.baseUrl + '/repos/' + org + '/' + repo +
+				'/contents/' + path + '?ref=' + ref;
+			var headers = {'Authorization': 'token ' + this.token};
 			tokens = path.split('/');
 			var name = (tokens.length > 0) ? tokens[tokens.length - 1] : path;
-	
-			this.ui.convertFile(url, name, null, this.extension, success, error);
+			this.ui.convertFile(url, name, null, this.extension, success, error, null, headers);
 		}
 		else
 		{
@@ -702,10 +715,13 @@ GitHubClient.prototype.saveFile = function(file, success, error, overwrite, mess
 	{
 		if (this.ui.useCanvasForExport && /(\.png)$/i.test(path))
 		{
+			var p = this.ui.getPngFileProperties(this.ui.fileNode);
+			
 			this.ui.getEmbeddedPng(mxUtils.bind(this, function(data)
 			{
 				fn(file.meta.sha, data);
-			}), error, (this.ui.getCurrentFile() != file) ? file.getData() : null);
+			}), error, (this.ui.getCurrentFile() != file) ?
+				file.getData() : null, p.scale, p.border);
 		}
 		else
 		{
@@ -769,7 +785,7 @@ GitHubClient.prototype.showGitHubDialog = function(showFiles, fn)
 	var content = document.createElement('div');
 	content.style.whiteSpace = 'nowrap';
 	content.style.overflow = 'hidden';
-	content.style.height = '224px';
+	content.style.height = '304px';
 
 	var hd = document.createElement('h3');
 	mxUtils.write(hd, mxResources.get((showFiles) ? 'selectFile' : 'selectFolder'));
@@ -783,7 +799,7 @@ GitHubClient.prototype.showGitHubDialog = function(showFiles, fn)
 	div.style.padding = '4px';
 	div.style.overflow = 'auto';
 	div.style.lineHeight = '1.2em';
-	div.style.height = '194px';
+	div.style.height = '274px';
 	content.appendChild(div);
 	
 	var listItem = document.createElement('div');
@@ -797,20 +813,21 @@ GitHubClient.prototype.showGitHubDialog = function(showFiles, fn)
 	{
 		fn(org + '/' + repo + '/' + encodeURIComponent(ref) + '/' + path);
 	}));
-	this.ui.showDialog(dlg.container, 340, 270, true, true);
+	this.ui.showDialog(dlg.container, 420, 360, true, true);
 	
 	if (showFiles)
 	{
 		dlg.okButton.parentNode.removeChild(dlg.okButton);
 	}
 	
-	var createLink = mxUtils.bind(this, function(label, fn, padding)
+	var createLink = mxUtils.bind(this, function(label, exec, padding)
 	{
 		var link = document.createElement('a');
-		link.setAttribute('href', 'javascript:void(0);');
+		link.setAttribute('title', label);
+		link.style.cursor = 'pointer';
 		mxUtils.write(link,  label);
-		mxEvent.addListener(link, 'click', fn);
-
+		mxEvent.addListener(link, 'click', exec);
+		
 		if (padding != null)
 		{
 			var temp = listItem.cloneNode();
@@ -887,34 +904,74 @@ GitHubClient.prototype.showGitHubDialog = function(showFiles, fn)
 		}));
 	});
 	
-	var selectFile = mxUtils.bind(this, function()
+	// Adds paging for repos, branches and files (files limited to 1000 by API)
+	var nextPageDiv = null;
+	var scrollFn = null;
+	var pageSize = 100;
+
+	var selectFile = mxUtils.bind(this, function(page)
 	{
+		if (page == null)
+		{
+			div.innerHTML = '';
+			page = 1;
+		}
+		
 		var req = new mxXmlRequest(this.baseUrl + '/repos/' + org + '/' + repo +
-				'/contents/' + path + '?ref=' + encodeURIComponent(ref), null, 'GET');
-		dlg.okButton.removeAttribute('disabled');
-		div.innerHTML = '';
+				'/contents/' + path + '?ref=' + encodeURIComponent(ref) +
+				'&per_page=' + pageSize + '&page=' + page, null, 'GET');
 		this.ui.spinner.spin(div, mxResources.get('loading'));
+		dlg.okButton.removeAttribute('disabled');
+		
+		if (scrollFn != null)
+		{
+			mxEvent.removeListener(div, 'scroll', scrollFn);
+			scrollFn = null;
+		}
+		
+		if (nextPageDiv != null && nextPageDiv.parentNode != null)
+		{
+			nextPageDiv.parentNode.removeChild(nextPageDiv);
+		}
+		
+		nextPageDiv = document.createElement('a');
+		nextPageDiv.style.display = 'block';
+		nextPageDiv.style.cursor = 'pointer';
+		mxUtils.write(nextPageDiv, mxResources.get('more') + '...');
+		
+		var nextPage = mxUtils.bind(this, function()
+		{
+			selectFile(page + 1);
+		});
+		
+		mxEvent.addListener(nextPageDiv, 'click', nextPage);
 		
 		this.executeRequest(req, mxUtils.bind(this, function(req)
 		{
-			updatePathInfo();
 			this.ui.spinner.stop();
-			var files = JSON.parse(req.getText());
-			div.appendChild(createLink('../ [Up]', mxUtils.bind(this, function()
+			
+			if (page == 1)
 			{
-				if (path == '')
+				updatePathInfo();
+				
+				div.appendChild(createLink('../ [Up]', mxUtils.bind(this, function()
 				{
-					path = null;
-					selectRepo();
-				}
-				else
-				{
-					var tokens = path.split('/');
-					path = tokens.slice(0, tokens.length - 1).join('/');
-					selectFile();
-				}
-			}), '4px'));
+					if (path == '')
+					{
+						path = null;
+						selectRepo();
+					}
+					else
+					{
+						var tokens = path.split('/');
+						path = tokens.slice(0, tokens.length - 1).join('/');
+						selectFile();
+					}
+				}), '4px'));
+			}
 
+			var files = JSON.parse(req.getText());
+			
 			if (files == null || files.length == 0)
 			{
 				mxUtils.write(div, mxResources.get('noFiles'));
@@ -922,6 +979,7 @@ GitHubClient.prototype.showGitHubDialog = function(showFiles, fn)
 			else
 			{
 				var gray = true;
+				var count = 0;
 				
 				var listFiles = mxUtils.bind(this, function(showFolders)
 				{
@@ -932,7 +990,8 @@ GitHubClient.prototype.showGitHubDialog = function(showFiles, fn)
 							if (showFolders == (file.type == 'dir'))
 							{
 								var temp = listItem.cloneNode();
-								temp.style.backgroundColor = (gray) ? '#eeeeee' : '';
+								temp.style.backgroundColor = (gray) ?
+									((uiTheme == 'dark') ? '#000000' : '#eeeeee') : '';
 								gray = !gray;
 
 								var typeImg = document.createElement('img');
@@ -958,6 +1017,7 @@ GitHubClient.prototype.showGitHubDialog = function(showFiles, fn)
 								})));
 								
 								div.appendChild(temp);
+								count++;
 							}
 						}))(files[i], i);
 					}
@@ -969,14 +1029,25 @@ GitHubClient.prototype.showGitHubDialog = function(showFiles, fn)
 				{
 					listFiles(false);
 				}
+				
+				// LATER: Paging not supported for contents in GitHub
+//				if (count == pageSize)
+//				{
+//					div.appendChild(nextPageDiv);
+//					
+//					scrollFn = function()
+//					{
+//						if (div.scrollTop >= div.scrollHeight - div.offsetHeight)
+//						{
+//							nextPage();
+//						}
+//					};
+//					
+//					mxEvent.addListener(div, 'scroll', scrollFn);
+//				}
 			}
 		}), error, true);
 	});
-	
-	// Adds paging for repos and branches (files limited to 1000 by API)
-	var pageSize = 100;
-	var nextPageDiv = null;
-	var scrollFn = null;
 
 	var selectRef = mxUtils.bind(this, function(page)
 	{
@@ -991,6 +1062,12 @@ GitHubClient.prototype.showGitHubDialog = function(showFiles, fn)
 		dlg.okButton.setAttribute('disabled', 'disabled');
 		this.ui.spinner.spin(div, mxResources.get('loading'));
 		
+		if (scrollFn != null)
+		{
+			mxEvent.removeListener(div, 'scroll', scrollFn);
+			scrollFn = null;
+		}
+		
 		if (nextPageDiv != null && nextPageDiv.parentNode != null)
 		{
 			nextPageDiv.parentNode.removeChild(nextPageDiv);
@@ -998,12 +1075,11 @@ GitHubClient.prototype.showGitHubDialog = function(showFiles, fn)
 		
 		nextPageDiv = document.createElement('a');
 		nextPageDiv.style.display = 'block';
-		nextPageDiv.setAttribute('href', 'javascript:void(0);');
+		nextPageDiv.style.cursor = 'pointer';
 		mxUtils.write(nextPageDiv, mxResources.get('more') + '...');
 		
 		var nextPage = mxUtils.bind(this, function()
 		{
-			mxEvent.removeListener(div, 'scroll', scrollFn);
 			selectRef(page + 1);
 		});
 		
@@ -1037,7 +1113,8 @@ GitHubClient.prototype.showGitHubDialog = function(showFiles, fn)
 					(mxUtils.bind(this, function(branch, idx)
 					{
 						var temp = listItem.cloneNode();
-						temp.style.backgroundColor = (idx % 2 == 0) ? '#eeeeee' : '';
+						temp.style.backgroundColor = (idx % 2 == 0) ?
+							((uiTheme == 'dark') ? '#000000' : '#eeeeee') : '';
 						
 						temp.appendChild(createLink(branch.name, mxUtils.bind(this, function()
 						{
@@ -1081,6 +1158,11 @@ GitHubClient.prototype.showGitHubDialog = function(showFiles, fn)
 		dlg.okButton.setAttribute('disabled', 'disabled');
 		this.ui.spinner.spin(div, mxResources.get('loading'));
 		
+		if (scrollFn != null)
+		{
+			mxEvent.removeListener(div, 'scroll', scrollFn);
+		}
+		
 		if (nextPageDiv != null && nextPageDiv.parentNode != null)
 		{
 			nextPageDiv.parentNode.removeChild(nextPageDiv);
@@ -1088,12 +1170,11 @@ GitHubClient.prototype.showGitHubDialog = function(showFiles, fn)
 		
 		nextPageDiv = document.createElement('a');
 		nextPageDiv.style.display = 'block';
-		nextPageDiv.setAttribute('href', 'javascript:void(0);');
+		nextPageDiv.style.cursor = 'pointer';
 		mxUtils.write(nextPageDiv, mxResources.get('more') + '...');
 		
 		var nextPage = mxUtils.bind(this, function()
 		{
-			mxEvent.removeListener(div, 'scroll', scrollFn);
 			selectRepo(page + 1);
 		});
 		
@@ -1174,7 +1255,8 @@ GitHubClient.prototype.showGitHubDialog = function(showFiles, fn)
 					(mxUtils.bind(this, function(repository, idx)
 					{
 						var temp = listItem.cloneNode();
-						temp.style.backgroundColor = (idx % 2 == 0) ? '#eeeeee' : '';
+						temp.style.backgroundColor = (idx % 2 == 0) ?
+							((uiTheme == 'dark') ? '#000000' : '#eeeeee') : '';
 						
 						temp.appendChild(createLink(repository.full_name, mxUtils.bind(this, function()
 						{

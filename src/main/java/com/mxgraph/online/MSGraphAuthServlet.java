@@ -8,9 +8,7 @@ import java.io.IOException;
 @SuppressWarnings("serial")
 public class MSGraphAuthServlet extends AbsAuthServlet
 {
-	public static String DEV_CLIENT_SECRET_FILE_PATH = "/WEB-INF/msgraph_dev_client_secret";
 	public static String CLIENT_SECRET_FILE_PATH = "/WEB-INF/msgraph_client_secret";
-	public static String DEV_CLIENT_ID_FILE_PATH = "/WEB-INF/msgraph_dev_client_id";
 	public static String CLIENT_ID_FILE_PATH = "/WEB-INF/msgraph_client_id";
 	
 	private static Config CONFIG = null;
@@ -19,58 +17,34 @@ public class MSGraphAuthServlet extends AbsAuthServlet
 	{
 		if (CONFIG == null)
 		{
-			CONFIG = new Config();
+			String clientSerets, clientIds;
 			
 			try
 			{
-				CONFIG.DEV_CLIENT_SECRET = Utils
-						.readInputStream(getServletContext()
-								.getResourceAsStream(DEV_CLIENT_SECRET_FILE_PATH))
-						.replaceAll("\n", "");
-			}
-			catch (IOException e)
-			{
-				throw new RuntimeException("Dev client secret path invalid.");
-			}
-			
-			try
-			{
-				CONFIG.CLIENT_SECRET = Utils
+				clientSerets = Utils
 						.readInputStream(getServletContext()
 								.getResourceAsStream(CLIENT_SECRET_FILE_PATH))
 						.replaceAll("\n", "");
 			}
 			catch (IOException e)
 			{
-				throw new RuntimeException("Client secret path invalid.");
+				throw new RuntimeException("Client secrets path invalid.");
 			}
 			
 			try
 			{
-				CONFIG.DEV_CLIENT_ID = Utils
-						.readInputStream(getServletContext()
-								.getResourceAsStream(DEV_CLIENT_ID_FILE_PATH))
-						.replaceAll("\n", "");
-			}
-			catch (IOException e)
-			{
-				throw new RuntimeException("Dev client ID invalid.");
-			}
-
-			try
-			{
-				CONFIG.CLIENT_ID = Utils
+				clientIds = Utils
 						.readInputStream(getServletContext()
 								.getResourceAsStream(CLIENT_ID_FILE_PATH))
 						.replaceAll("\n", "");
 			}
 			catch (IOException e)
 			{
-				throw new RuntimeException("Client ID invalid.");
+				throw new RuntimeException("Client IDs path invalid.");
 			}
 			
-			CONFIG.DEV_REDIRECT_URI = "https://test.draw.io/microsoft";
-			CONFIG.REDIRECT_URI = "https://www.draw.io/microsoft";
+			CONFIG = new Config(clientIds, clientSerets);
+			CONFIG.REDIRECT_PATH = "/microsoft";
 			CONFIG.AUTH_SERVICE_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/token";
 		}
 		
@@ -97,9 +71,11 @@ public class MSGraphAuthServlet extends AbsAuthServlet
 			res.append("{");
 			res.append("	window.opener.onOneDriveCallback(authInfo, window);");
 			res.append("} else {");
-			res.append("	Office.initialize = function () { Office.context.ui.messageParent(JSON.stringify(authInfo));}");
+			res.append("	var authInfoStr = JSON.stringify(authInfo);");
+			res.append("	localStorage.setItem('tmpODAuth', authInfoStr);");
+			res.append("	Office.onReady(function () { Office.context.ui.messageParent(authInfoStr);});");
 			res.append("}");
-			res.append("</script></head><body></body></html>");
+			res.append("</script></head><body><div>Automatic login interrupted. Please close and select OneDrive again.</div></body></html>");
 		}
 
 		return res.toString();
